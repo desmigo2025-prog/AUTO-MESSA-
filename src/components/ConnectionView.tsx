@@ -14,10 +14,12 @@ export default function ConnectionView() {
   const fetchStatus = async () => {
     try {
       const res = await fetch('/api/status');
-      const data = await res.json();
-      setStatus(data);
+      if (res.ok) {
+        const data = await res.json();
+        setStatus(data);
+      }
     } catch (e) {
-      console.error(e);
+      // Ignore network errors during dev server restarts
     }
   };
 
@@ -38,7 +40,7 @@ export default function ConnectionView() {
   };
 
   const initiatePhoneConnection = async () => {
-    if (!phoneNumber.trim()) return;
+    if (!(phoneNumber || '').trim()) return;
     setLoading(true);
     setPairingCode(null);
     try {
@@ -134,7 +136,7 @@ export default function ConnectionView() {
                   onChange={(e) => setPhoneNumber(e.target.value)}
                   className="mb-4 text-center text-lg"
                 />
-                <Button onClick={initiatePhoneConnection} disabled={loading || !phoneNumber.trim()} size="lg" className="w-full bg-blue-600 hover:bg-blue-700">
+                <Button onClick={initiatePhoneConnection} disabled={loading || !(phoneNumber || '').trim()} size="lg" className="w-full bg-blue-600 hover:bg-blue-700">
                   {loading ? <RefreshCcw className="w-4 h-4 mr-2 animate-spin" /> : null}
                   Request Pairing Code
                 </Button>

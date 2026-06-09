@@ -12,10 +12,20 @@ interface LogEvent {
 }
 
 export default function DashboardView() {
-  const [stats, setStats] = useState({ sent: 1245, scheduled: 2, groups: 8 });
+  const [stats, setStats] = useState({ sent: 0, scheduled: 0, groups: 0 });
   const [logs, setLogs] = useState<LogEvent[]>([]);
 
   useEffect(() => {
+    // Fetch initial stats
+    fetch('/api/dashboard-stats')
+      .then(res => res.json())
+      .then(data => {
+        if (data) {
+          setStats({ sent: data.sent || 0, scheduled: data.scheduled || 0, groups: data.groups || 0 });
+        }
+      })
+      .catch(() => {});
+
     // Listen to real-time events from our SSE route
     const evtSource = new EventSource('/api/events');
     

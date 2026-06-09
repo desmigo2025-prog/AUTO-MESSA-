@@ -19,12 +19,14 @@ const ai = new GoogleGenAI({
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // WhatsApp State
 let sock: any = null;
 let qrCodeUrl: string | null = null;
 let isConnected = false;
+let globalSentCount = 0;
 
 // Basic setup for WhatsApp
 async function connectToWhatsApp() {
@@ -82,10 +84,20 @@ app.get('/api/events', (req, res) => {
   let eventCounter = 0;
   
   const listener = (data: any) => {
-    res.write(`data: ${JSON.stringify({ ...data, timestamp: new Date().toISOString(), id: `${Date.now()}-${eventCounter++}` })}\n\n`);
+    try {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ ...data, timestamp: new Date().toISOString(), id: `${Date.now()}-${eventCounter++}` })}\n\n`);
+      }
+    } catch (e) {
+      // Ignore write errors to closed sockets
+    }
   };
   
   appEvents.on('activity', listener);
+  
+  res.on('error', () => {
+    appEvents.removeListener('activity', listener);
+  });
   
   req.on('close', () => {
     appEvents.removeListener('activity', listener);
@@ -144,11 +156,27 @@ app.post("/api/connect", async (req, res) => {
   res.json({ success: true, message: "Disconnected" });
 });
 
+let templates: { id: string; name: string; content: string }[] = [];
+
 app.post("/api/templates", (req, res) => {
   const { name, content } = req.body;
-  // We can just log it or store it in memory.
+  const newTemplate = {
+    id: Math.random().toString(36).substring(7),
+    name: name || "New Template",
+    content
+  };
+  templates.push(newTemplate);
   appEvents.emit('activity', { type: 'success', message: `Saved new template: "${name}"` });
-  res.json({ success: true, message: "Template saved" });
+  res.json({ success: true, message: "Template saved", template: newTemplate });
+});
+
+app.get("/api/templates", (req, res) => {
+  res.json({ templates });
+});
+
+app.delete("/api/templates/:id", (req, res) => {
+  templates = templates.filter(t => t.id !== req.params.id);
+  res.json({ success: true });
 });
 
 app.get("/api/chats", async (req, res) => {
@@ -181,16 +209,27 @@ Keywords: ${keywords ? keywords.join(", ") : "none"}
 
 Generate ONLY the message content. Use emojis appropriately.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-    });
+    let response;
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-3.1-flash-lite",
+          contents: prompt,
+        });
+        break;
+      } catch (err: any) {
+        retries--;
+        if (retries === 0) throw err;
+        await new Promise(res => setTimeout(res, 2000));
+      }
+    }
     
     appEvents.emit('activity', { type: 'ai', message: `Generated new AI draft on topic: "${topic.substring(0, 30)}..."` });
-    res.json({ text: response.text });
+    res.json({ text: response?.text || "" });
   } catch (error: any) {
     console.error("Gemini Error:", error);
-    res.status(500).json({ error: "Failed to generate message." });
+    res.status(500).json({ error: error.message || "Failed to generate message." });
   }
 });
 
@@ -206,8 +245,24 @@ app.post("/api/send", async (req, res) => {
       let msgContent: any = { text: message };
       
       if (attachmentUrl) {
-         if (attachmentType === 'image') msgContent = { image: { url: attachmentUrl }, caption: message };
+         const isBase64 = attachmentUrl.startsWith('data:');
+         if (attachmentType === 'file' && isBase64) {
+             const matches = attachmentUrl.match(/^data:(.+?);base64,(.*)$/);
+             if (matches && matches.length === 3) {
+                 const mimeType = matches[1];
+                 const buffer = Buffer.from(matches[2], 'base64');
+                 if (mimeType.startsWith('image/')) {
+                     msgContent = { image: buffer, caption: message };
+                 } else if (mimeType.startsWith('video/')) {
+                     msgContent = { video: buffer, caption: message };
+                 } else {
+                     msgContent = { document: buffer, mimetype: mimeType, fileName: 'attached_file', caption: message };
+                 }
+             }
+         }
+         else if (attachmentType === 'image') msgContent = { image: { url: attachmentUrl }, caption: message };
          else if (attachmentType === 'video') msgContent = { video: { url: attachmentUrl }, caption: message };
+         else if (attachmentType === 'document_url') msgContent = { document: { url: attachmentUrl }, mimetype: 'application/octet-stream', fileName: 'document', caption: message };
          // for 'link' we just rely on whatsapp parsing the URL which we append to the text or send separately
          else msgContent.text = message + `\n\nLink: ${attachmentUrl}`;
       }
@@ -215,6 +270,7 @@ app.post("/api/send", async (req, res) => {
       await sock.sendMessage(jid, msgContent);
       console.log(`[REAL] Sending message to ${jid} with attachment ${attachmentUrl || 'none'}`);
     }
+    globalSentCount += chatIds.length;
     appEvents.emit('activity', { type: 'success', message: `Sent messages to ${chatIds.length} target(s).` });
     if (attachmentUrl) {
       appEvents.emit('activity', { type: 'system', message: `Attached media (${attachmentType}): ${attachmentUrl.substring(0, 30)}...` });
@@ -236,6 +292,8 @@ interface Campaign {
   scheduleTime: string; // HH:mm
   targets: string[];
   message: string;
+  attachmentType?: string;
+  attachmentUrl?: string;
   messagesSent: number;
   lastRunSent?: string;
 }
@@ -244,6 +302,24 @@ let campaigns: Campaign[] = [];
 
 app.get("/api/campaigns", (req, res) => {
   res.json({ campaigns });
+});
+
+app.get("/api/dashboard-stats", async (req, res) => {
+  let groupsCount = 0;
+  if (isConnected && sock) {
+    try {
+      const groups = await sock.groupFetchAllParticipating();
+      groupsCount = Object.keys(groups).length;
+    } catch (e) {
+      // Ignore
+    }
+  }
+  const activeSchedules = campaigns.filter(c => c.status === 'active').length;
+  res.json({
+    sent: globalSentCount,
+    scheduled: activeSchedules,
+    groups: groupsCount
+  });
 });
 
 app.post("/api/campaigns", (req, res) => {
@@ -255,6 +331,8 @@ app.post("/api/campaigns", (req, res) => {
     scheduleTime: req.body.scheduleTime,
     targets: req.body.targets,
     message: req.body.message,
+    attachmentType: req.body.attachmentType,
+    attachmentUrl: req.body.attachmentUrl,
     messagesSent: 0
   };
   campaigns.push(newCamp);
@@ -305,11 +383,33 @@ setInterval(async () => {
         let sentCount = 0;
         for (const jid of c.targets) {
             try {
-                await sock.sendMessage(jid, { text: c.message });
+                let msgContent: any = { text: c.message };
+                if (c.attachmentUrl) {
+                  const isBase64 = c.attachmentUrl.startsWith('data:');
+                  if (c.attachmentType === 'file' && isBase64) {
+                      const matches = c.attachmentUrl.match(/^data:(.+?);base64,(.*)$/);
+                      if (matches && matches.length === 3) {
+                          const mimeType = matches[1];
+                          const buffer = Buffer.from(matches[2], 'base64');
+                          if (mimeType.startsWith('image/')) {
+                              msgContent = { image: buffer, caption: c.message };
+                          } else if (mimeType.startsWith('video/')) {
+                              msgContent = { video: buffer, caption: c.message };
+                          } else {
+                              msgContent = { document: buffer, mimetype: mimeType, fileName: 'attached_file', caption: c.message };
+                          }
+                      }
+                  } else if (c.attachmentType === 'image') msgContent = { image: { url: c.attachmentUrl }, caption: c.message };
+                  else if (c.attachmentType === 'video') msgContent = { video: { url: c.attachmentUrl }, caption: c.message };
+                  else if (c.attachmentType === 'document_url') msgContent = { document: { url: c.attachmentUrl }, mimetype: 'application/octet-stream', fileName: 'document', caption: c.message };
+                  else msgContent.text = c.message + `\n\nLink: ${c.attachmentUrl}`;
+                }
+                await sock.sendMessage(jid, msgContent);
                 sentCount++;
             } catch (err) {}
         }
         c.messagesSent += sentCount;
+        globalSentCount += sentCount;
         appEvents.emit('activity', { type: 'success', message: `Scheduled campaign "${c.name}" triggered: Sent to ${sentCount} targets.` });
         appEvents.emit('activity', { type: 'stats_update', stat: 'sent', count: sentCount });
       } else {

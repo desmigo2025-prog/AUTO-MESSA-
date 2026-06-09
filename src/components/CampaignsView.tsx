@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Plus, Play, Pause, Trash2, Calendar, Loader2 } from 'lucide-react';
+import { Plus, Play, Pause, Trash2, Calendar, Loader2, Sparkles } from 'lucide-react';
 import { Textarea } from '@/components/ui/textarea';
 
 export default function CampaignsView() {
@@ -21,6 +21,9 @@ export default function CampaignsView() {
       .then(data => {
         if (data.campaigns) setCampaigns(data.campaigns);
         setIsLoading(false);
+      })
+      .catch(() => {
+        setIsLoading(false);
       });
   };
 
@@ -31,7 +34,7 @@ export default function CampaignsView() {
       .then(data => {
         if (data.chats) setChats(data.chats);
       })
-      .catch(console.error);
+      .catch(() => {});
   }, []);
 
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -40,9 +43,12 @@ export default function CampaignsView() {
   const [newName, setNewName] = useState('');
   const [newTargets, setNewTargets] = useState<string[]>([]);
   const [newMessage, setNewMessage] = useState('');
+  const [attachmentType, setAttachmentType] = useState('none');
+  const [attachmentUrl, setAttachmentUrl] = useState('');
   const [newScheduleType, setNewScheduleType] = useState('Daily');
   const [newScheduleTime, setNewScheduleTime] = useState('09:00');
   const [isCreating, setIsCreating] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const toggleCampaignStatus = async (id: string) => {
     // Optimistic UI update
@@ -69,8 +75,40 @@ export default function CampaignsView() {
     return `${formattedH.toString().padStart(2, '0')}:${minutes} ${suffix}`;
   };
 
+  const handleGenerateMessage = async () => {
+    if (!(newName || '').trim()) {
+      alert("Please enter a campaign name first so AI knows what to write about.");
+      return;
+    }
+    setIsGenerating(true);
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          topic: newName, 
+          context: 'An automated recurring campaign message', 
+          audience: 'Customers or Team', 
+          tone: 'Professional and engaging' 
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Server error");
+      }
+      if (data.text) {
+        setNewMessage(data.text);
+      }
+    } catch(e: any) {
+      console.error(e);
+      alert(e.message || "Failed to generate message. The model might be experiencing high demand. Please try again later.");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const handleCreateCampaign = async () => {
-    if (!newName.trim() || newTargets.length === 0 || !newScheduleTime || !newMessage.trim()) return;
+    if (!(newName || '').trim() || newTargets.length === 0 || !newScheduleTime || !(newMessage || '').trim()) return;
     
     setIsCreating(true);
     try {
@@ -82,7 +120,9 @@ export default function CampaignsView() {
           scheduleType: newScheduleType,
           scheduleTime: newScheduleTime,
           targets: newTargets,
-          message: newMessage
+          message: newMessage,
+          attachmentType: attachmentType,
+          attachmentUrl: (attachmentUrl || '').trim() ? attachmentUrl : undefined
         })
       });
       if (res.ok) {
@@ -90,6 +130,8 @@ export default function CampaignsView() {
         setNewName('');
         setNewTargets([]);
         setNewMessage('');
+        setAttachmentType('none');
+        setAttachmentUrl('');
         setNewScheduleType('Daily');
         setNewScheduleTime('09:00');
         setIsDialogOpen(false);
@@ -180,18 +222,80 @@ export default function CampaignsView() {
                 </div>
               </div>
               <div className="grid gap-2">
-                <Label>Message Content</Label>
+                <div className="flex items-center justify-between">
+                  <Label>Message Content</Label>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    className="h-7 text-xs text-purple-600 bg-purple-50 border-purple-200 hover:bg-purple-100 hover:text-purple-700"
+                    onClick={handleGenerateMessage}
+                    disabled={isGenerating || !(newName || '').trim()}
+                  >
+                    {isGenerating ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Sparkles className="w-3 h-3 mr-1" />}
+                    Auto-Generate
+                  </Button>
+                </div>
                 <Textarea 
                   placeholder="Message to be sent automatically..."
-                  className="h-24 resize-none"
+                  className="h-24 resize-none mb-3"
                   value={newMessage}
                   onChange={e => setNewMessage(e.target.value)}
                 />
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <Select value={attachmentType} onValueChange={v => { setAttachmentType(v); setAttachmentUrl(''); }}>
+                    <SelectTrigger className="w-[120px]">
+                      <SelectValue placeholder="Attachment" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No Media</SelectItem>
+                      <SelectItem value="image">Image URL</SelectItem>
+                      <SelectItem value="video">Video URL</SelectItem>
+                      <SelectItem value="document_url">Document URL</SelectItem>
+                      <SelectItem value="link">Link</SelectItem>
+                      <SelectItem value="file">File Upload</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {attachmentType !== 'none' && attachmentType !== 'file' && (
+                    <div className="flex-1">
+                      <Input
+                        placeholder={`Enter ${attachmentType} URL...`}
+                        value={attachmentUrl}
+                        onChange={e => setAttachmentUrl(e.target.value)}
+                        className="w-full"
+                      />
+                    </div>
+                  )}
+                  {attachmentType === 'file' && (
+                    <div className="flex-1">
+                      <Input
+                        type="file"
+                        onChange={e => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                             if (file.size > 15 * 1024 * 1024) {
+                               alert("File size must be less than 15MB");
+                               e.target.value = '';
+                               return;
+                             }
+                             const reader = new FileReader();
+                             reader.onload = () => {
+                               setAttachmentUrl(reader.result as string);
+                             };
+                             reader.readAsDataURL(file);
+                          } else {
+                             setAttachmentUrl('');
+                          }
+                        }}
+                        className="w-full"
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setIsDialogOpen(false)}>Cancel</Button>
-              <Button onClick={handleCreateCampaign} disabled={isCreating || !newName.trim() || newTargets.length === 0 || !newMessage.trim()} className="bg-emerald-600 hover:bg-emerald-700">
+              <Button onClick={handleCreateCampaign} disabled={isCreating || !(newName || '').trim() || newTargets.length === 0 || !(newMessage || '').trim()} className="bg-emerald-600 hover:bg-emerald-700">
                 {isCreating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                 Save Campaign
               </Button>

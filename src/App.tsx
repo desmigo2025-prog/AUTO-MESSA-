@@ -4,6 +4,8 @@ import DashboardView from './components/DashboardView';
 import AiGeneratorView from './components/AiGeneratorView';
 import ConnectionView from './components/ConnectionView';
 import CampaignsView from './components/CampaignsView';
+import TemplatesView from './components/TemplatesView';
+import ScheduledView from './components/ScheduledView';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState('dashboard');
@@ -25,6 +27,8 @@ export default function App() {
       case 'generator': return <AiGeneratorView />;
       case 'connection': return <ConnectionView />;
       case 'campaigns': return <CampaignsView />;
+      case 'templates': return <TemplatesView />;
+      case 'scheduled': return <ScheduledView />;
       default: return (
         <div className="flex flex-col items-center justify-center h-64 text-gray-400">
           <MessageSquare className="w-16 h-16 mb-4 opacity-50" />

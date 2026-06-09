@@ -27,7 +27,7 @@ export default function AiGeneratorView() {
       .then(data => {
         if (data.chats) setChats(data.chats);
       })
-      .catch(console.error);
+      .catch(() => {});
   }, []);
 
   const handleSend = async () => {
@@ -43,7 +43,7 @@ export default function AiGeneratorView() {
         body: JSON.stringify({ 
           chatIds: selectedChats, 
           message: generatedMessage,
-          attachmentUrl: attachmentUrl.trim() ? attachmentUrl : undefined,
+          attachmentUrl: (attachmentUrl || '').trim() ? attachmentUrl : undefined,
           attachmentType
         })
       });
@@ -71,16 +71,20 @@ export default function AiGeneratorView() {
           topic,
           tone,
           length,
-          keywords: keywords.split(',').map(k => k.trim()).filter(k => k)
+          keywords: (keywords || '').split(',').map(k => k.trim()).filter(k => k)
         })
       });
       const data = await res.json();
-      setGeneratedMessage(data.text);
-    } catch (e) {
+      if (!res.ok) {
+        throw new Error(data.error || "Server error");
+      }
+      setGeneratedMessage(data.text || '');
+    } catch (e: any) {
       console.error(e);
-      setGeneratedMessage('Failed to generate message. Please make sure the Gemini API key is configured correctly.');
+      alert(e.message || 'Failed to generate message. The model might be experiencing high demand. Please try again later.');
+    } finally {
+      setIsGenerating(false);
     }
-    setIsGenerating(false);
   };
 
   return (
@@ -142,7 +146,7 @@ export default function AiGeneratorView() {
             </div>
           </CardContent>
           <CardFooter>
-            <Button onClick={handleGenerate} disabled={isGenerating || !topic.trim()} className="w-full bg-emerald-600 hover:bg-emerald-700">
+            <Button onClick={handleGenerate} disabled={isGenerating || !(topic || '').trim()} className="w-full bg-emerald-600 hover:bg-emerald-700">
               {isGenerating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Sparkles className="w-4 h-4 mr-2" />}
               Generate Draft
             </Button>
@@ -176,28 +180,57 @@ export default function AiGeneratorView() {
                   <select 
                     className="flex h-10 w-full sm:w-[150px] items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                     value={attachmentType}
-                    onChange={(e) => setAttachmentType(e.target.value)}
+                    onChange={(e) => { setAttachmentType(e.target.value); setAttachmentUrl(''); }}
                   >
                     <option value="link">Public Link</option>
                     <option value="image">Image URL</option>
                     <option value="video">Video URL</option>
+                    <option value="document_url">Document URL</option>
+                    <option value="file">File Upload</option>
                   </select>
                   <div className="relative flex-1">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                      {attachmentType === 'image' ? <ImageIcon className="h-4 w-4 text-gray-400" /> : 
-                       attachmentType === 'video' ? <Video className="h-4 w-4 text-gray-400" /> : 
-                       <Link className="h-4 w-4 text-gray-400" />}
-                    </div>
-                    <Input 
-                      className="pl-9"
-                      placeholder={
-                        attachmentType === 'image' ? "https://example.com/image.jpg" :
-                        attachmentType === 'video' ? "https://example.com/video.mp4" :
-                        "https://example.com/article"
-                      }
-                      value={attachmentUrl}
-                      onChange={(e) => setAttachmentUrl(e.target.value)}
-                    />
+                    {attachmentType !== 'file' ? (
+                      <>
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                          {attachmentType === 'image' ? <ImageIcon className="h-4 w-4 text-gray-400" /> : 
+                           attachmentType === 'video' ? <Video className="h-4 w-4 text-gray-400" /> : 
+                           <Link className="h-4 w-4 text-gray-400" />}
+                        </div>
+                        <Input 
+                          className="pl-9"
+                          placeholder={
+                            attachmentType === 'image' ? "https://example.com/image.jpg" :
+                            attachmentType === 'video' ? "https://example.com/video.mp4" :
+                            attachmentType === 'document_url' ? "https://example.com/doc.pdf" :
+                            "https://example.com/article"
+                          }
+                          value={attachmentUrl}
+                          onChange={(e) => setAttachmentUrl(e.target.value)}
+                        />
+                      </>
+                    ) : (
+                      <Input
+                        type="file"
+                        onChange={e => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                             if (file.size > 15 * 1024 * 1024) {
+                               alert("File size must be less than 15MB");
+                               e.target.value = '';
+                               return;
+                             }
+                             const reader = new FileReader();
+                             reader.onload = () => {
+                               setAttachmentUrl(reader.result as string);
+                             };
+                             reader.readAsDataURL(file);
+                          } else {
+                             setAttachmentUrl('');
+                          }
+                        }}
+                        className="w-full"
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -231,32 +264,82 @@ export default function AiGeneratorView() {
             
             <div className="flex justify-between items-center w-full">
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => {
+                <Button variant="outline" size="sm" onClick={async () => {
+                  if (!generatedMessage.trim()) {
+                     alert("Nothing to copy! Please write or generate a message first.");
+                     return;
+                  }
                   if (generatedMessage) {
-                    navigator.clipboard.writeText(generatedMessage);
-                    alert("Copied to clipboard!");
+                    try {
+                      let copied = false;
+                      if (navigator.clipboard) {
+                        try {
+                          await navigator.clipboard.writeText(generatedMessage);
+                          copied = true;
+                        } catch(e) {}
+                      }
+                      if (!copied) {
+                        const textArea = document.createElement("textarea");
+                        textArea.value = generatedMessage;
+                        textArea.style.position = "fixed";
+                        textArea.style.left = "-999999px";
+                        textArea.style.top = "-999999px";
+                        document.body.appendChild(textArea);
+                        textArea.focus();
+                        textArea.select();
+                        try {
+                          if (document.execCommand('copy')) {
+                            copied = true;
+                          }
+                        } catch(e) {}
+                        textArea.remove();
+                      }
+                      if (copied) {
+                         alert("Copied to clipboard!");
+                      } else {
+                         alert("Please manually copy the text.");
+                      }
+                    } catch(err) {
+                      alert("Please manually copy the text.");
+                    }
                   }
                 }}>
                   <Copy className="w-4 h-4 mr-2" />
                   Copy
                 </Button>
                 <Button variant="outline" size="sm" onClick={async () => {
+                   if (!generatedMessage.trim()) {
+                      alert("Nothing to save! Please write or generate a message first.");
+                      return;
+                   }
                    if (generatedMessage) {
                      try {
-                       await fetch('/api/templates', {
+                       const res = await fetch('/api/templates', {
                          method: 'POST',
                          headers: { 'Content-Type': 'application/json' },
-                         body: JSON.stringify({ name: topic || 'New Template', content: generatedMessage })
+                         body: JSON.stringify({ name: topic || 'New AI Template', content: generatedMessage })
                        });
-                       alert("Template saved!");
-                     } catch(e) { }
+                       if (res.ok) {
+                         alert("Template saved!");
+                       } else {
+                         alert("Failed to save template.");
+                       }
+                     } catch(e) { 
+                       alert("Error saving template.");
+                     }
                    }
                 }}>
                   <BookmarkPlus className="w-4 h-4 mr-2" />
                   Save Template
                 </Button>
               </div>
-              <Button onClick={handleSend} disabled={!generatedMessage.trim() || isSending} className="bg-blue-600 hover:bg-blue-700">
+              <Button onClick={() => {
+                if (!(generatedMessage || '').trim() && !attachmentUrl) {
+                  alert("Please generate a message or add an attachment first!");
+                  return;
+                }
+                handleSend();
+              }} disabled={isSending} className="bg-blue-600 hover:bg-blue-700">
                 {isSending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />}
                 Send to {selectedChats.length} Targets
               </Button>
